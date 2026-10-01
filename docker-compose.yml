@@ -1,0 +1,60 @@
+# RLD Talent Intelligence v2 - production stack for the office PC.
+# Lives at <repo>/deploy/docker-compose.yml. Run all commands from this folder.
+name: rld-talent
+
+services:
+  ollama:
+    image: ollama/ollama:latest            # pin to a tested version once everything works
+    restart: always
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "24h"             # keep models in VRAM, no cold starts
+      OLLAMA_NUM_PARALLEL: "2"             # two concurrent generations
+      OLLAMA_MAX_LOADED_MODELS: "2"        # qwen3:8b + glm-ocr resident together
+      OLLAMA_CONTEXT_LENGTH: "${CONTEXT_LENGTH:-8192}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  app:
+    build:
+      context: ..                          # repo root
+      dockerfile: deploy/Dockerfile
+    image: rld-talent-app:latest
+    restart: always
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      DB_FILENAME: talent_pool.db
+      FRONTEND_DIST: /app/frontend/dist
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - app-data:/data                     # SQLite DB + uploaded resumes; survives rebuilds
+      - ../backend/data:/seed:ro           # first-run seed source only (read-only)
+    ports:
+      # Office LAN: http://rldintelligence (port 80). Set APP_PORT=8080 in .env if port 80 is taken.
+      - "${APP_PORT:-80}:8000"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s                   # search index for ~4k candidates builds at startup
+
+volumes:
+  ollama-models:
+  app-data:
